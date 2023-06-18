@@ -35,7 +35,7 @@ from error import bad_request
 from worker import ingest_worker
 import celeryconfig
 
-from perftimer import perftimer
+from perftimer import perftimer, TimerCallbackHandler
 
 timer = perftimer()
 
@@ -278,9 +278,11 @@ def api_answer():
         timer.timepoint('constructed q prompt')
         
 
+        handler = TimerCallbackHandler(timer)
+
         if llm_choice == "openai_chat":
             # llm = ChatOpenAI(openai_api_key=api_key, model_name="gpt-4")
-            llm = ChatOpenAI(openai_api_key=api_key)
+            llm = ChatOpenAI(openai_api_key=api_key, callbacks=[handler])
             messages_combine = [
                 SystemMessagePromptTemplate.from_template(
                     chat_combine_template),
@@ -294,7 +296,7 @@ def api_answer():
             ]
             p_chat_reduce = ChatPromptTemplate.from_messages(messages_reduce)
         elif llm_choice == "openai":
-            llm = OpenAI(openai_api_key=api_key, temperature=0)
+            llm = OpenAI(openai_api_key=api_key, temperature=0, callbacks=[handler])
         elif llm_choice == "manifest":
             llm = ManifestWrapper(client=manifest, llm_kwargs={
                                   "temperature": 0.001, "max_tokens": 2048})
@@ -310,7 +312,7 @@ def api_answer():
         if llm_choice == "openai_chat":
 
             timer.timepoint('starting openai chat')
-            question_generator = LLMChain(
+            question_generator = LLMChain( callbacks=[handler],
                 llm=llm, prompt=CONDENSE_QUESTION_PROMPT)
             
             timer.timepoint('set quesiton generator')
@@ -322,6 +324,7 @@ def api_answer():
             chain = ConversationalRetrievalChain(
                 retriever=docsearch.as_retriever(k=2),
                 question_generator=question_generator,
+                callbacks=[handler],
                 combine_docs_chain=doc_chain,
                 return_source_documents=True
             )
@@ -353,13 +356,13 @@ def api_answer():
 
             timer.conclude("returning answer")
             return jsonify(
-                answer=result['answer']+' timepoint injection '+str(timer.dumptimepoints()),
+                answer=result['answer']+' \ntimepoint injection:\n'+'\n'.join(timer.dumptimepoints()),
                 sources=sources,
             )
         
         timer.conclude("returning answer")
         return jsonify(
-            answer=result['answer']+' timepoint injection '+str(timer.dumptimepoints())
+            answer=result['answer']+' \ntimepoint injection:\n'+'\n'.join(timer.dumptimepoints())
         )
 
     except Exception as e:
