@@ -35,6 +35,10 @@ from error import bad_request
 from worker import ingest_worker
 import celeryconfig
 
+from perftimer import perftimer
+
+timer = perftimer()
+
 # os.environ["LANGCHAIN_HANDLER"] = "langchain"
 
 if os.getenv("LLM_NAME") is not None:
@@ -203,11 +207,13 @@ def api_answer():
     # }
 
     # json_data = json.dumps(data)
+    timer.initialize()
 
     # return (json_data)
     data = request.get_json()
     question = data["question"]
     history = data["history"]
+
     print('-' * 5)
     if not api_key_set:
         api_key = data["api_key"]
@@ -218,14 +224,19 @@ def api_answer():
     else:
         embeddings_key = os.getenv("EMBEDDINGS_KEY")
 
+    timer.timepoint('after getting request data')
+
     # use try and except  to check for exception
     try:
         # check if the vectorstore is set
+
         if "active_docs" in data:
             vectorstore = "indexes/" + data["active_docs"]
         else:
             vectorstore = ""
         print('vector store is' + vectorstore)
+
+        timer.timepoint('set vector store location')
         # vectorstore = "outputs/inputs/"
         # loading the index and the store and the prompt template
         # Note if you have used other embeddings than OpenAI, you need to change the embeddings
@@ -242,19 +253,31 @@ def api_answer():
             docsearch = FAISS.load_local(
                 vectorstore, CohereEmbeddings(cohere_api_key=embeddings_key))
 
+        timer.timepoint(f'loaded embeddings choice ({embeddings_choice})')
+
         # create a prompt template
         if history:
+            timer.timepoint('loading embeddings history')
+
             history = json.loads(history)
             template_temp = template_hist.replace("{historyquestion}", history[0]).replace("{historyanswer}",
                                                                                            history[1])
             c_prompt = PromptTemplate(input_variables=["summaries", "question"], template=template_temp,
                                       template_format="jinja2")
+            
+            timer.timepoint('finished constructing c prompt from embeddings history')
         else:
             c_prompt = PromptTemplate(input_variables=["summaries", "question"], template=template,
                                       template_format="jinja2")
+            timer.timepoint('constructed c prompt')
+
 
         q_prompt = PromptTemplate(input_variables=["context", "question"], template=template_quest,
                                   template_format="jinja2")
+        
+        timer.timepoint('constructed q prompt')
+        
+
         if llm_choice == "openai_chat":
             # llm = ChatOpenAI(openai_api_key=api_key, model_name="gpt-4")
             llm = ChatOpenAI(openai_api_key=api_key)
@@ -282,21 +305,35 @@ def api_answer():
             llm = Cohere(model="command-xlarge-nightly",
                          cohere_api_key=api_key)
 
+        timer.timepoint(f'set message parameters with llm choice ({llm_choice})')
+
         if llm_choice == "openai_chat":
+
+            timer.timepoint('starting openai chat')
             question_generator = LLMChain(
                 llm=llm, prompt=CONDENSE_QUESTION_PROMPT)
+            
+            timer.timepoint('set quesiton generator')
+
             doc_chain = load_qa_with_sources_chain(
                 llm, chain_type="map_reduce", combine_prompt=p_chat_combine)
+            
+            timer.timepoint('set doc chain') 
             chain = ConversationalRetrievalChain(
                 retriever=docsearch.as_retriever(k=2),
                 question_generator=question_generator,
                 combine_docs_chain=doc_chain,
                 return_source_documents=True
             )
+            timer.timepoint('set conversational retrival chain') 
+
             chat_history = []
             # result = chain({"question": question, "chat_history": chat_history})
             # generate async with async generate method
             result = async_generate(chain, question, chat_history)
+
+            timer.timepoint('generated result')
+
         else:
             qa_chain = load_qa_with_sources_chain(llm=llm, chain_type="map_reduce",
                                                   combine_prompt=c_prompt, question_prompt=q_prompt)
@@ -304,18 +341,25 @@ def api_answer():
                                vectorstore=docsearch, k=3)
             result = chain({"query": question})
 
+        timer.timepoint(f'got result from llm')
+
         sources = []
+
+
         if result['source_documents']:
             for doc in result['source_documents']:
                 metadata = extract_metadata(doc.metadata)
                 sources.append(metadata)
+
+            timer.conclude("returning answer")
             return jsonify(
-                answer=result['answer'],
+                answer=result['answer']+' timepoint injection '+str(timer.dumptimepoints()),
                 sources=sources,
             )
-
+        
+        timer.conclude("returning answer")
         return jsonify(
-            answer=result['answer']
+            answer=result['answer']+' timepoint injection '+str(timer.dumptimepoints())
         )
 
     except Exception as e:
